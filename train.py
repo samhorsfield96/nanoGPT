@@ -26,6 +26,9 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from tokenizers import Tokenizer
+from panGPT import GenomeDataset
+from torch.utils.data import DataLoader
 
 from model import GPTConfig, GPT
 
@@ -111,18 +114,32 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
+# generate training and validation data
+tokenizer = Tokenizer.from_file(os.path.join(data_dir, 'tokens.bin'))
+vocab_size = tokenizer.get_vocab_size()  # Set vocab_size for the model
+with (open(os.path.join(data_dir, 'train.bin'), "rb")) as f:
+    train_genomes = pickle.load(f)
+
+with (open(os.path.join(data_dir, 'val.bin'), "rb")) as f:
+    val_genomes = pickle.load(f)
+
+train_dataset = GenomeDataset(train_genomes, tokenizer, block_size)
+val_dataset = GenomeDataset(val_genomes, tokenizer, block_size)
+
 # poor man's data loader
 #data_dir = dataset
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+        data = train_dataset
+        ix = torch.randint(len(train_dataset), (batch_size,))
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+        data = val_dataset
+        ix = torch.randint(len(val_dataset), (batch_size,))
+    sample_batch = [data.batch_sample(i) for i in ix]
+    x = torch.stack([sample[0] for sample in sample_batch])
+    y = torch.stack([sample[1] for sample in sample_batch])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
