@@ -39,8 +39,7 @@ class GenomeDataset(Dataset):
         return len(self.texts)
 
     def __getitem__(self, idx):
-        text = self.texts[idx]
-        encoded = self.tokenizer.encode(text).ids
+        encoded = self.texts[idx]
 
         if len(encoded) > self.max_length:
             encoded = encoded[: self.max_length]
@@ -67,6 +66,3 @@ class GenomeDataset(Dataset):
         )
 
         return torch.tensor(padded_data), torch.tensor(padded_obs)
-    
-    def print(self):
-        print(self.texts)

@@ -7,18 +7,22 @@ from contextlib import nullcontext
 import torch
 import tiktoken
 from model import GPTConfig, GPT
+from tokenizers import Tokenizer
+from panGPT import GenomeDataset
 
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+stop = "False" #or "<|endoftext|>"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
-meta_path = 'data/meta.pkl'
+#meta_path = 'data/meta.pkl'
+tokenizer_path = "data/tokens.bin"
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -54,36 +58,23 @@ model.to(device)
 if compile:
     model = torch.compile(model) # requires PyTorch 2.0 (optional)
 
-# look for the meta pickle in case it is available in the dataset folder
-#load_meta = True
-#if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']: # older checkpoints might not have these...
-load_meta = os.path.exists(meta_path)
-if load_meta:
-    print(f"Loading meta from {meta_path}...")
-    with open(meta_path, 'rb') as f:
-        meta = pickle.load(f)
-    # TODO want to make this more general to arbitrary encoder/decoder schemes
-    stoi, itos = meta['stoi'], meta['itos']
-    encode = lambda s: [stoi[c] for c in [s]]
-    decode = lambda l: ' '.join([itos[i] for i in l])
-#else:
-    # ok let's assume gpt-2 encodings by default
-#    print("No meta.pkl found, assuming GPT-2 encodings...")
-#    enc = tiktoken.get_encoding("gpt2")
-#    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
-#    decode = lambda l: enc.decode(l)
+tokenizer = Tokenizer.from_file(tokenizer_path)
 
 # encode the beginning of the prompt
 if start.startswith('FILE:'):
     with open(start[5:], 'r', encoding='utf-8') as f:
         start = f.read()
-start_ids = encode(start)
+start_ids = tokenizer.encode(start).ids
+if stop != "False":
+    stop = tokenizer.encode(stop).ids[0]
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k, stop = stop)
+            generated_sequence = tokenizer.decode(y[0].tolist())
+            print(generated_sequence)
             print('---------------')
+            print("Total tokens: {}".format(len(y[0].tolist())))
