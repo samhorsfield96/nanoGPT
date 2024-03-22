@@ -52,7 +52,7 @@ class GenomeDataset(Dataset):
     def batch_sample(self, genome_idx):
         #text = self.texts[genome_idx]
         encoded = self.texts[genome_idx]
-        pos_idx = torch.randint(len(encoded) - self.max_length, (1,))[0]
+        pos_idx = torch.randint(len(encoded), (1,))[0]
 
         data = encoded[pos_idx : pos_idx + self.max_length]
         obs = encoded[pos_idx + 1 : pos_idx + self.max_length + 1]
