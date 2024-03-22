@@ -27,7 +27,6 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from tokenizers import Tokenizer
-from panGPT import GenomeDataset
 from torch.utils.data import DataLoader
 
 from model import GPTConfig, GPT
@@ -118,13 +117,10 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 tokenizer = Tokenizer.from_file(os.path.join(data_dir, 'tokens.bin'))
 vocab_size = tokenizer.get_vocab_size()  # Set vocab_size for the model
 with (open(os.path.join(data_dir, 'train.bin'), "rb")) as f:
-    train_genomes = pickle.load(f)
+    train_dataset = pickle.load(f)
 
 with (open(os.path.join(data_dir, 'val.bin'), "rb")) as f:
-    val_genomes = pickle.load(f)
-
-train_dataset = GenomeDataset(train_genomes, tokenizer, block_size)
-val_dataset = GenomeDataset(val_genomes, tokenizer, block_size)
+    val_dataset = pickle.load(f)
 
 # poor man's data loader
 #data_dir = dataset
@@ -137,7 +133,7 @@ def get_batch(split):
     else:
         data = val_dataset
         ix = torch.randint(len(val_dataset), (batch_size,))
-    sample_batch = [data.batch_sample(i) for i in ix]
+    sample_batch = [data.batch_sample(i, batch_size) for i in ix]
     x = torch.stack([sample[0] for sample in sample_batch])
     y = torch.stack([sample[1] for sample in sample_batch])
     if device_type == 'cuda':

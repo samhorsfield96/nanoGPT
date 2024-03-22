@@ -30,39 +30,29 @@ class GenomeDataset(Dataset):
             (tensor) at the specified index.
     """
 
-    def __init__(self, texts, tokenizer, max_length):
+    def __init__(self, texts, tokenizer):
         self.tokenizer = tokenizer
         self.texts = [self.tokenizer.encode(text).ids for text in texts]
-        self.max_length = max_length
 
     def __len__(self):
         return len(self.texts)
 
-    def __getitem__(self, idx):
-        encoded = self.texts[idx]
-
-        if len(encoded) > self.max_length:
-            encoded = encoded[: self.max_length]
-
-        padded = encoded + [self.tokenizer.token_to_id("[PAD]")] * (
-            self.max_length - len(encoded)
-        )
-        return torch.tensor(padded)
-
-    def batch_sample(self, genome_idx):
+    def batch_sample(self, genome_idx, max_length):
         #text = self.texts[genome_idx]
         encoded = self.texts[genome_idx]
         pos_idx = torch.randint(len(encoded), (1,))[0]
 
-        data = encoded[pos_idx : pos_idx + self.max_length]
-        obs = encoded[pos_idx + 1 : pos_idx + self.max_length + 1]
+        data = encoded[pos_idx : pos_idx + max_length]
+        obs = encoded[pos_idx + 1 : pos_idx + max_length + 1]
 
-        padded_data = data + [self.tokenizer.token_to_id("[PAD]")] * (
-            self.max_length - len(data)
+        # add padding token, use -100 as described here: 
+        # https://www.reddit.com/r/MachineLearning/comments/157zkks/d_should_i_mask_padding_tokens_when_finetuning_a/?rdt=53406
+        padded_data = data + [-100] * (
+            max_length - len(data)
         )
 
-        padded_obs = obs + [self.tokenizer.token_to_id("[PAD]")] * (
-            self.max_length - len(obs)
+        padded_obs = obs + [-100] * (
+            max_length - len(obs)
         )
 
         return torch.tensor(padded_data), torch.tensor(padded_obs)
