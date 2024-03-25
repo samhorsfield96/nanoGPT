@@ -35,6 +35,7 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
+data_dir = 'data'
 eval_interval = 2000
 log_interval = 1
 eval_iters = 200
@@ -46,7 +47,6 @@ wandb_log = False # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
-#dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
@@ -133,7 +133,7 @@ def get_batch(split):
     else:
         data = val_dataset
         ix = torch.randint(len(val_dataset), (batch_size,))
-    sample_batch = [data.batch_sample(i, batch_size) for i in ix]
+    sample_batch = [data.batch_sample(i, block_size) for i in ix]
     x = torch.stack([sample[0] for sample in sample_batch])
     y = torch.stack([sample[1] for sample in sample_batch])
     if device_type == 'cuda':
