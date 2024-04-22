@@ -43,7 +43,9 @@ class GenomeDataset(Dataset):
     def batch_sample(self, genome_idx, max_length):
         #text = self.texts[genome_idx]
         encoded = self.texts[genome_idx]
-        pos_idx = torch.randint(len(encoded), (1,))[0]
+        encoded_len = len(encoded)
+
+        pos_idx = 0 if encoded_len <= max_length else torch.randint(encoded_len - max_length, (1,))[0] 
 
         data = encoded[pos_idx : pos_idx + max_length]
         obs = encoded[pos_idx + 1 : pos_idx + max_length + 1]
@@ -57,5 +59,9 @@ class GenomeDataset(Dataset):
         padded_obs = obs + [self.tokenizer.token_to_id("[PAD]")] * (
             max_length - len(obs)
         )
+
+        # print(pos_idx)
+        # print(padded_data)
+        # print(padded_obs)
 
         return torch.tensor(padded_data), torch.tensor(padded_obs)

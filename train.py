@@ -59,6 +59,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
+max_epochs = 400 # total number of epochs
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -118,6 +119,7 @@ ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torc
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # generate training and validation data
+print("Loading training data...")
 tokenizer = Tokenizer.from_file(os.path.join(data_dir, 'tokens.bin'))
 vocab_size = tokenizer.get_vocab_size()  # Set vocab_size for the model
 with (open(os.path.join(data_dir, 'train.bin'), "rb")) as f:
@@ -126,14 +128,25 @@ with (open(os.path.join(data_dir, 'train.bin'), "rb")) as f:
 with (open(os.path.join(data_dir, 'val.bin'), "rb")) as f:
     val_dataset = pickle.load(f)
 
+# generate set of indices remaining to be sampled
+train_dataset_size = len(train_dataset)
+train_dataset_indices = set(range(0, train_dataset_size))
+
+print("Loading complete")
+
 # poor man's data loader
 #data_dir = dataset
-def get_batch(split):
+def get_batch(split, random=False):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+    global train_dataset_indices
     if split == 'train':
         data = train_dataset
-        ix = torch.randint(len(train_dataset), (batch_size,))
+        if random == True:
+            ix = torch.randint(len(train_dataset), (batch_size,))
+        else:
+            ix = np.random.choice(list(train_dataset_indices), replace=False, size=min(batch_size, len(train_dataset_indices)))
+            train_dataset_indices = train_dataset_indices - set(ix)
     else:
         data = val_dataset
         ix = torch.randint(len(val_dataset), (batch_size,))
@@ -149,6 +162,7 @@ def get_batch(split):
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
+epoch_num = 1
 best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
@@ -236,7 +250,7 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y = get_batch(split, random=True)
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
@@ -276,11 +290,11 @@ while True:
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-    # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0 and master_process:
+    # first iteration evaluation
+    if iter_num == 0 and master_process:
         losses = estimate_loss()
-        eval_loss_list.append((iter_num, losses['train'], losses['val'], lr, running_mfu*100))
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        eval_loss_list.append(("0", str(iter_num), str(losses['train'].item()), str(losses['val'].item()), str(lr), str(running_mfu*100)))
+        print(f"epoch 0, step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
@@ -289,19 +303,7 @@ while True:
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
-            if iter_num > 0:
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+
     if iter_num == 0 and eval_only:
         break
 
@@ -335,29 +337,63 @@ while True:
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
-    if iter_num % log_interval == 0 and master_process:
+    if (iter_num % log_interval == 0 or len(train_dataset_indices) == 0) and master_process:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        loss_list.append((iter_num, lossf, dt, running_mfu*100))
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        loss_list.append((str(epoch_num), str(iter_num), str(lossf), str(dt), str(running_mfu*100)))
+        print(f"epoch {epoch_num}, iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+
+    if len(train_dataset_indices) == 0:
+        # reset dataset indices
+        train_dataset_indices = set(range(0, train_dataset_size))
+
+        # evaluate the loss on train/val sets and write checkpoints
+        if master_process:
+            losses = estimate_loss()
+            eval_loss_list.append((str(epoch_num), str(iter_num), str(losses['train'].item()), str(losses['val'].item()), str(lr), str(running_mfu*100)))
+            print(f"epoch {epoch_num}, step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            if wandb_log:
+                wandb.log({
+                    "iter": iter_num,
+                    "train/loss": losses['train'],
+                    "val/loss": losses['val'],
+                    "lr": lr,
+                    "mfu": running_mfu*100, # convert to percentage
+                })
+            if losses['val'] < best_val_loss or always_save_checkpoint:
+                best_val_loss = losses['val']
+                if iter_num > 0:
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'model_args': model_args,
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                        'config': config,
+                    }
+                    print(f"saving checkpoint to {out_dir}")
+                    torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+        
+        epoch_num += 1
+
     iter_num += 1
     local_iter_num += 1
-
+    
     # termination conditions
-    if iter_num > max_iters:
+    if epoch_num > max_epochs:
         break
 
 with open(os.path.join(out_dir, 'eval_loss.csv'), "w") as f:
-    f.write("Iteration,Train_loss,Val_loss,Learning_rate,mfu\n")
+    f.write("Epoch,Iteration,Train_loss,Val_loss,Learning_rate,mfu\n")
     for entry in eval_loss_list:
         f.write(",".join(entry) + "\n")
 
 with open(os.path.join(out_dir, 'loss.csv'), "w") as f:
-    f.write("Iteration,Train_loss,time,mfu\n")
+    f.write("Epoch,Iteration,Train_loss,time,mfu\n")
     for entry in loss_list:
         f.write(",".join(entry) + "\n")
 
