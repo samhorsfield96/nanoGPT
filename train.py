@@ -28,6 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from tokenizers import Tokenizer
 from torch.utils.data import DataLoader
+import math
 
 from model import GPTConfig, GPT
 
@@ -35,9 +36,11 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
+summary_file = 'summary.txt'
+param_set_ID = 1
 data_dir = 'data'
-eval_interval = 2000
-log_interval = 1
+eval_interval = 200
+log_interval = 10
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
@@ -47,7 +50,7 @@ wandb_log = False # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
+gradient_accumulation_steps = 1 # 5 * 8 used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
 # model
@@ -66,8 +69,8 @@ beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 2000 # how many steps to warm up for
-lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+warmup_epochs = 10 # how many steps to warm up for
+lr_decay_epochs = 400 # should be ~= max_epochs per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -131,6 +134,10 @@ with (open(os.path.join(data_dir, 'val.bin'), "rb")) as f:
 # generate set of indices remaining to be sampled
 train_dataset_size = len(train_dataset)
 train_dataset_indices = set(range(0, train_dataset_size))
+iters_per_epoch = math.ceil(train_dataset_size / batch_size)
+#max_iters = iters_per_epoch * max_epochs
+warmup_iters = warmup_epochs * iters_per_epoch
+lr_decay_iters =  lr_decay_epochs * iters_per_epoch
 
 print("Loading complete")
 
@@ -164,6 +171,7 @@ def get_batch(split, random=False):
 iter_num = 0
 epoch_num = 1
 best_val_loss = 1e9
+best_train_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
@@ -283,6 +291,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+
 while True:
 
     # determine and set the learning rate for this iteration
@@ -319,10 +328,18 @@ while True:
         with ctx:
             logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+        
+        # break if epoch reached
+        if len(train_dataset_indices) == 0:
+            # backward pass, with gradient scaling if training in fp16
+            scaler.scale(loss).backward()
+            break
+        
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
+
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
@@ -366,6 +383,7 @@ while True:
                 })
             if losses['val'] < best_val_loss or always_save_checkpoint:
                 best_val_loss = losses['val']
+                best_train_loss = losses['train']
                 if iter_num > 0:
                     checkpoint = {
                         'model': raw_model.state_dict(),
@@ -396,6 +414,15 @@ with open(os.path.join(out_dir, 'loss.csv'), "w") as f:
     f.write("Epoch,Iteration,Train_loss,time,mfu\n")
     for entry in loss_list:
         f.write(",".join(entry) + "\n")
+
+output_summary = [param_set_ID, batch_size, block_size, n_layer, n_head, n_embd, dropout, learning_rate, max_epochs, 
+                  weight_decay, beta1, beta2, grad_clip, decay_lr, warmup_epochs, lr_decay_epochs, 
+                  min_lr, best_train_loss.item(), math.exp(best_train_loss), best_val_loss.item(), math.exp(best_val_loss)]
+
+output_summary = [str(x) for x in output_summary]
+
+with open(summary_file, "a+") as f:
+    f.write("\t".join(output_summary))
 
 if ddp:
     destroy_process_group()
